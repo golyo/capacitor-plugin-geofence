@@ -328,12 +328,17 @@ final class GeofenceEngine: NSObject, CLLocationManagerDelegate, UNUserNotificat
         }
     }
 
-    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
         if let raw = response.notification.request.content.userInfo["geofence.notification.data"] {
             onNotificationClicked?(raw)
         } else {
             onNotificationClicked?(response.notification.request.content.userInfo)
         }
+        completionHandler()
     }
 
     private func locationPermissionStatusString() -> String {
