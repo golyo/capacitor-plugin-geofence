@@ -22,6 +22,19 @@ public class GeofencePlugin: CAPPlugin, CAPBridgedPlugin {
     ]
     private let engine = GeofenceEngine()
 
+    private func getArray<T>(_ call: CAPPluginCall, key: String) -> [T]? {
+        return call.options[key] as? [T]
+    }
+
+    private func getString(_ call: CAPPluginCall, key: String) -> String? {
+        return call.options[key] as? String
+    }
+
+    private func getInt(_ call: CAPPluginCall, key: String) -> Int? {
+        return call.options[key] as? Int
+    }
+
+
     public override func load() {
         super.load()
 
@@ -69,7 +82,7 @@ public class GeofencePlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func addOrUpdate(_ call: CAPPluginCall) {
-        guard let geofences = call.getArray("geofences", JSObject.self) else {
+        guard let geofences: [JSObject] = getArray(call, key: "geofences") else {
             call.resolve()
             return
         }
@@ -77,12 +90,15 @@ public class GeofencePlugin: CAPPlugin, CAPBridgedPlugin {
             try engine.addOrUpdate(geofences: geofences)
             call.resolve()
         } catch {
-            call.reject("ADD_GEOFENCE_FAILED", "\(error)", error)
+            call.resolve([
+                "error": "ADD_GEOFENCE_FAILED",
+                "message": "\(error)"
+            ])
         }
     }
 
     @objc func remove(_ call: CAPPluginCall) {
-        guard let ids = call.getArray("ids", String.self) else {
+        guard let ids: [String] = getArray(call, key: "ids") else {
             call.resolve()
             return
         }
@@ -103,13 +119,13 @@ public class GeofencePlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func dismissNotifications(_ call: CAPPluginCall) {
-        let ids = call.getArray("ids", Int.self) ?? []
+        let ids: [Int] = getArray(call, key: "ids") ?? []
         engine.dismissNotifications(ids: ids)
         call.resolve()
     }
 
     @objc func snooze(_ call: CAPPluginCall) {
-        if let id = call.getString("id"), let duration = call.getInt("duration") {
+        if let id = getString(call, key: "id"), let duration = getInt(call, key: "duration") {
             engine.snooze(id: id, durationSeconds: duration)
         }
         call.resolve()
