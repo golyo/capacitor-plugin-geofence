@@ -2,13 +2,17 @@ import Foundation
 import CoreLocation
 import UserNotifications
 import Capacitor
+import os
 
 final class GeofenceEngine: NSObject, CLLocationManagerDelegate, UNUserNotificationCenterDelegate {
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "GeofenceEngine", category: "GeofenceEngine")
+
     private let locationManager = CLLocationManager()
     private let notificationCenter = UNUserNotificationCenter.current()
     private let store = UserDefaults.standard
     private let watchedStoreKey = "geofence.watched"
     private let snoozedStoreKey = "geofence.snoozedUntil"
+    private let locationNotificationPrefix = "geofence.locnotif."
 
     private var watched: [String: JSObject] = [:]
     private var snoozedFences: [String: TimeInterval] = [:]
@@ -25,6 +29,7 @@ final class GeofenceEngine: NSObject, CLLocationManagerDelegate, UNUserNotificat
         super.init()
         locationManager.delegate = self
         locationManager.desiredAccuracy = kCLLocationAccuracyBest
+        locationManager.allowsBackgroundLocationUpdates = true
         notificationCenter.delegate = self
         watched = loadWatched()
         snoozedFences = loadSnoozed()
@@ -80,6 +85,7 @@ final class GeofenceEngine: NSObject, CLLocationManagerDelegate, UNUserNotificat
             guard let id = geofence["id"] as? String, !id.isEmpty else { continue }
             watched[id] = geofence
             try startMonitoring(geofence: geofence)
+            upsertLocationNotificationRequests(geofence: geofence)
         }
         persistWatched()
     }
@@ -91,6 +97,7 @@ final class GeofenceEngine: NSObject, CLLocationManagerDelegate, UNUserNotificat
             if let region = monitoredRegion(id: id) {
                 locationManager.stopMonitoring(for: region)
             }
+            removeLocationNotificationRequests(id: id)
         }
         persistWatched()
         persistSnoozed()
@@ -102,6 +109,7 @@ final class GeofenceEngine: NSObject, CLLocationManagerDelegate, UNUserNotificat
         for region in locationManager.monitoredRegions {
             locationManager.stopMonitoring(for: region)
         }
+        removeAllLocationNotificationRequests()
         persistWatched()
         persistSnoozed()
     }
@@ -147,8 +155,123 @@ final class GeofenceEngine: NSObject, CLLocationManagerDelegate, UNUserNotificat
     }
 
     private func restoreMonitoring() {
+        // Avoid stop+start cycles on already-monitored regions to prevent canceling a pending boundary event.
+        let alreadyMonitored = Set(locationManager.monitoredRegions.map { $0.identifier })
         for geofence in watched.values {
-            try? startMonitoring(geofence: geofence)
+            guard let id = geofence["id"] as? String, !id.isEmpty else { continue }
+            if !alreadyMonitored.contains(id) {
+                try? ensureMonitoring(geofence: geofence)
+            }
+
+            // System-managed notifications (Cordova-style): can fire even if the app is force-killed.
+            upsertLocationNotificationRequests(geofence: geofence)
+        }
+    }
+
+    private func ensureMonitoring(geofence: JSObject) throws {
+        guard
+            let id = geofence["id"] as? String,
+            let latitude = numberValue(from: geofence["latitude"]),
+            let longitude = numberValue(from: geofence["longitude"]),
+            let radius = numberValue(from: geofence["radius"])
+        else {
+            throw NSError(domain: "GeofenceEngine", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid geofence payload"])
+        }
+
+        if monitoredRegion(id: id) != nil {
+            return
+        }
+
+        let region = CLCircularRegion(center: CLLocationCoordinate2D(latitude: latitude, longitude: longitude), radius: radius, identifier: id)
+        let transitionType = intValue(from: geofence["transitionType"]) ?? 1
+        region.notifyOnEntry = transitionType == 1 || transitionType == 3
+        region.notifyOnExit = transitionType == 2 || transitionType == 3
+        locationManager.startMonitoring(for: region)
+    }
+
+    private func locationNotificationRequestId(id: String, transition: String) -> String {
+        return "\(locationNotificationPrefix)\(id).\(transition)"
+    }
+
+    private func upsertLocationNotificationRequests(geofence: JSObject) {
+        scheduleLocationNotificationRequests(geofence: geofence)
+    }
+
+    private func scheduleLocationNotificationRequests(geofence: JSObject) {
+        guard
+            let id = geofence["id"] as? String,
+            !id.isEmpty,
+            let notification = geofence["notification"] as? JSObject,
+            let latitude = numberValue(from: geofence["latitude"]),
+            let longitude = numberValue(from: geofence["longitude"]),
+            let radius = numberValue(from: geofence["radius"])
+        else {
+            return
+        }
+
+        let transitionType = intValue(from: geofence["transitionType"]) ?? 1
+        let shouldEnter = transitionType == 1 || transitionType == 3
+        let shouldExit = transitionType == 2 || transitionType == 3
+
+        func makeContent(transition: String) -> UNMutableNotificationContent {
+            let content = UNMutableNotificationContent()
+            let title = (notification["title"] as? String ?? "Geofence").replacingOccurrences(of: "$transition", with: transition)
+            content.title = title
+            content.body = notification["text"] as? String ?? "Geofence transition received"
+            content.sound = .default
+
+            if let data = notification["data"] {
+                if JSONSerialization.isValidJSONObject(["d": data]),
+                   let payload = try? JSONSerialization.data(withJSONObject: data),
+                   let jsonString = String(data: payload, encoding: .utf8) {
+                    content.userInfo = ["geofence.notification.data": jsonString]
+                } else if let stringData = data as? String {
+                    content.userInfo = ["geofence.notification.data": stringData]
+                }
+            }
+            return content
+        }
+
+        if shouldEnter {
+            let reqId = locationNotificationRequestId(id: id, transition: "enter")
+            let region = CLCircularRegion(center: CLLocationCoordinate2D(latitude: latitude, longitude: longitude), radius: radius, identifier: reqId)
+            region.notifyOnEntry = true
+            region.notifyOnExit = false
+            let trigger = UNLocationNotificationTrigger(region: region, repeats: true)
+            let request = UNNotificationRequest(identifier: reqId, content: makeContent(transition: "enter"), trigger: trigger)
+            notificationCenter.add(request)
+            logger.info("scheduled UNLocationNotificationTrigger id=\(reqId, privacy: .public)")
+        }
+
+        if shouldExit {
+            let reqId = locationNotificationRequestId(id: id, transition: "exit")
+            let region = CLCircularRegion(center: CLLocationCoordinate2D(latitude: latitude, longitude: longitude), radius: radius, identifier: reqId)
+            region.notifyOnEntry = false
+            region.notifyOnExit = true
+            let trigger = UNLocationNotificationTrigger(region: region, repeats: true)
+            let request = UNNotificationRequest(identifier: reqId, content: makeContent(transition: "exit"), trigger: trigger)
+            notificationCenter.add(request)
+            logger.info("scheduled UNLocationNotificationTrigger id=\(reqId, privacy: .public)")
+        }
+    }
+
+    private func removeLocationNotificationRequests(id: String) {
+        let enterId = locationNotificationRequestId(id: id, transition: "enter")
+        let exitId = locationNotificationRequestId(id: id, transition: "exit")
+        notificationCenter.removePendingNotificationRequests(withIdentifiers: [enterId, exitId])
+        notificationCenter.removeDeliveredNotifications(withIdentifiers: [enterId, exitId])
+    }
+
+    private func removeAllLocationNotificationRequests() {
+        notificationCenter.getPendingNotificationRequests { [weak self] requests in
+            guard let self else { return }
+            let ids = requests.map { $0.identifier }.filter { $0.hasPrefix(self.locationNotificationPrefix) }
+            self.notificationCenter.removePendingNotificationRequests(withIdentifiers: ids)
+        }
+        notificationCenter.getDeliveredNotifications { [weak self] notifications in
+            guard let self else { return }
+            let ids = notifications.map { $0.request.identifier }.filter { $0.hasPrefix(self.locationNotificationPrefix) }
+            self.notificationCenter.removeDeliveredNotifications(withIdentifiers: ids)
         }
     }
 
@@ -161,7 +284,7 @@ final class GeofenceEngine: NSObject, CLLocationManagerDelegate, UNUserNotificat
         watched[id] = geofence
         persistWatched()
 
-        sendNotificationIfConfigured(geofence: geofence, transitionType: transitionType)
+        // Notifications are scheduled via UNLocationNotificationTrigger when geofences are added/updated.
         onTransitionReceived?([geofence])
     }
 
@@ -296,14 +419,17 @@ final class GeofenceEngine: NSObject, CLLocationManagerDelegate, UNUserNotificat
     }
 
     func locationManager(_ manager: CLLocationManager, didEnterRegion region: CLRegion) {
+        logger.info("didEnterRegion id=\(region.identifier, privacy: .public)")
         handleTransition(id: region.identifier, transitionType: 1)
     }
 
     func locationManager(_ manager: CLLocationManager, didExitRegion region: CLRegion) {
+        logger.info("didExitRegion id=\(region.identifier, privacy: .public)")
         handleTransition(id: region.identifier, transitionType: 2)
     }
 
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        logger.info("locationManagerDidChangeAuthorization status=\(CLLocationManager.authorizationStatus().rawValue, privacy: .public)")
         if let completion = pendingLocationPermissionCompletion {
             pendingLocationPermissionCompletion = nil
             checkPermissionStatus(completion: completion)
@@ -328,11 +454,64 @@ final class GeofenceEngine: NSObject, CLLocationManagerDelegate, UNUserNotificat
         }
     }
 
-    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        logger.info("notificationClicked")
         if let raw = response.notification.request.content.userInfo["geofence.notification.data"] {
             onNotificationClicked?(raw)
         } else {
             onNotificationClicked?(response.notification.request.content.userInfo)
+        }
+        completionHandler()
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        if #available(iOS 14.0, *) {
+            completionHandler([.banner, .sound])
+        } else {
+            completionHandler([.alert, .sound])
+        }
+    }
+
+    func debugSnapshot(completion: @escaping (JSObject) -> Void) {
+        let watchedIds = watched.keys.sorted()
+        let monitoredRegionIds = locationManager.monitoredRegions.map { $0.identifier }.sorted()
+
+        notificationCenter.getPendingNotificationRequests { [weak self] requests in
+            guard let self else { return }
+
+            let pending: [JSObject] = requests
+                .filter { $0.identifier.hasPrefix(self.locationNotificationPrefix) }
+                .map { req in
+                    var triggerType = "unknown"
+                    var regionId: String? = nil
+                    if let locationTrigger = req.trigger as? UNLocationNotificationTrigger {
+                        triggerType = "location"
+                        regionId = locationTrigger.region.identifier
+                    }
+                    return [
+                        "id": req.identifier,
+                        "triggerType": triggerType,
+                        "regionId": regionId ?? NSNull(),
+                    ]
+                }
+                .sorted { ($0["id"] as? String ?? "") < ($1["id"] as? String ?? "") }
+
+            self.notificationCenter.getNotificationSettings { settings in
+                completion([
+                    "watchedIds": watchedIds,
+                    "monitoredRegionIds": monitoredRegionIds,
+                    "pendingLocationNotifications": pending,
+                    "permissions": self.buildPermissionStatusPayload(notificationSettings: settings),
+                ])
+            }
         }
     }
 
