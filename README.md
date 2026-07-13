@@ -69,8 +69,8 @@ npx cap sync
 ### Android
 
 - `minSdkVersion`: `24`
-- `targetSdkVersion`: `36`
-- `compileSdk`: `36`
+- `targetSdkVersion`: `35`
+- `compileSdk`: `35`
 - Designed to be compatible with Android API `33+` permission model:
   - `POST_NOTIFICATIONS` runtime permission handling
   - foreground/background location permission separation
@@ -475,7 +475,9 @@ removeAllListeners() => Promise<void>
 
 Construct a type with a set of properties K of type T
 
-<code>{ [P in K]: T; }</code>
+<code>{
+ [P in K]: T;
+ }</code>
 
 
 #### InitMissingPermission

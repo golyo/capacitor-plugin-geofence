@@ -13,7 +13,10 @@ import androidx.core.app.NotificationManagerCompat
 import com.google.android.gms.location.Geofence
 import com.google.android.gms.location.GeofencingEvent
 import org.json.JSONObject
-import java.time.Instant
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 
 class GeofenceTransitionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -64,14 +67,20 @@ class GeofenceTransitionReceiver : BroadcastReceiver() {
     private fun isWithinTimeRange(geofence: JSONObject): Boolean {
         val start = geofence.optString("startTime", "")
         val end = geofence.optString("endTime", "")
-        val now = Instant.now()
+        if (start.isEmpty() && end.isEmpty()) return true
+
+        val now = Date()
+        val isoFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
+            timeZone = TimeZone.getTimeZone("UTC")
+        }
+
         if (start.isNotEmpty()) {
-            val startInstant = runCatching { Instant.parse(start) }.getOrNull()
-            if (startInstant != null && now.isBefore(startInstant)) return false
+            val startDate = runCatching { isoFormat.parse(start) }.getOrNull()
+            if (startDate != null && now.before(startDate)) return false
         }
         if (end.isNotEmpty()) {
-            val endInstant = runCatching { Instant.parse(end) }.getOrNull()
-            if (endInstant != null && now.isAfter(endInstant)) return false
+            val endDate = runCatching { isoFormat.parse(end) }.getOrNull()
+            if (endDate != null && now.after(endDate)) return false
         }
         return true
     }
@@ -111,11 +120,18 @@ class GeofenceTransitionReceiver : BroadcastReceiver() {
                 val payload = if (data == null) geofence.toString() else data.toString()
                 launchIntent.putExtra(GeofencePlugin.EXTRA_NOTIFICATION_DATA, payload)
                 launchIntent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                
+                val flags = if (Build.VERSION.SDK_INT >= 31) {
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                } else {
+                    PendingIntent.FLAG_UPDATE_CURRENT
+                }
+                
                 val pendingIntent = PendingIntent.getActivity(
                     context,
                     id,
                     launchIntent,
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                    flags
                 )
                 builder.setContentIntent(pendingIntent)
             }

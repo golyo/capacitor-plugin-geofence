@@ -355,7 +355,11 @@ class GeofencePlugin : Plugin() {
             val intent = Intent(context, GeofenceTransitionReceiver::class.java)
             // Geofencing API populates transition data on the PendingIntent,
             // so this must remain mutable on Android 12+.
-            val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+            val flags = if (android.os.Build.VERSION.SDK_INT >= 31) {
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+            } else {
+                PendingIntent.FLAG_UPDATE_CURRENT
+            }
             return PendingIntent.getBroadcast(context, 1001, intent, flags)
         }
 
