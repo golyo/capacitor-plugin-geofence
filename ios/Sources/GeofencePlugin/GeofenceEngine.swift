@@ -29,7 +29,7 @@ final class GeofenceEngine: NSObject, CLLocationManagerDelegate, UNUserNotificat
         super.init()
         locationManager.delegate = self
         locationManager.desiredAccuracy = kCLLocationAccuracyBest
-        locationManager.allowsBackgroundLocationUpdates = true
+        updateBackgroundLocationUpdatesFlag()
         notificationCenter.delegate = self
         watched = loadWatched()
         snoozedFences = loadSnoozed()
@@ -430,6 +430,7 @@ final class GeofenceEngine: NSObject, CLLocationManagerDelegate, UNUserNotificat
 
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         logger.info("locationManagerDidChangeAuthorization status=\(CLLocationManager.authorizationStatus().rawValue, privacy: .public)")
+        updateBackgroundLocationUpdatesFlag()
         if let completion = pendingLocationPermissionCompletion {
             pendingLocationPermissionCompletion = nil
             checkPermissionStatus(completion: completion)
@@ -564,6 +565,7 @@ final class GeofenceEngine: NSObject, CLLocationManagerDelegate, UNUserNotificat
 
     private func continueInitializeFlow() {
         checkPermissionStatus { status in
+            self.updateBackgroundLocationUpdatesFlag()
             if self.shouldRequestNotification(status) {
                 self.markRequested("notification")
                 self.requestNotificationPermission { _ in
@@ -668,5 +670,21 @@ final class GeofenceEngine: NSObject, CLLocationManagerDelegate, UNUserNotificat
 
     private func notificationPermissionValue(_ status: JSObject) -> String {
         return (status["notifications"] as? String) ?? "prompt"
+    }
+
+    private func updateBackgroundLocationUpdatesFlag() {
+        let shouldEnable = shouldEnableBackgroundLocationUpdates()
+        if locationManager.allowsBackgroundLocationUpdates != shouldEnable {
+            locationManager.allowsBackgroundLocationUpdates = shouldEnable
+        }
+    }
+
+    private func shouldEnableBackgroundLocationUpdates() -> Bool {
+        guard CLLocationManager.authorizationStatus() == .authorizedAlways else {
+            return false
+        }
+
+        let backgroundModes = Bundle.main.object(forInfoDictionaryKey: "UIBackgroundModes") as? [String]
+        return backgroundModes?.contains("location") == true
     }
 }
