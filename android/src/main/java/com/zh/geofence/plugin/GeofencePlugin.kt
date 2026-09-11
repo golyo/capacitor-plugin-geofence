@@ -407,63 +407,49 @@ class GeofencePlugin : Plugin() {
         val requested: MutableSet<String> = mutableSetOf()
     )
 
+    private data class InitPermissionSnapshot(
+        val location: PermissionState,
+        val backgroundLocation: PermissionState,
+        val notifications: PermissionState,
+        val backgroundRelevant: Boolean,
+        val notificationsRelevant: Boolean,
+    )
+
     private fun continueInitializeFlow(call: PluginCall) {
         val state = initStates[call.callbackId] ?: InitState()
         initStates[call.callbackId] = state
 
-        if (shouldRequestNotification() && !state.requested.contains("notification")) {
+        val snapshot = currentInitPermissionSnapshot()
+        if (computeMissing(snapshot).isEmpty()) {
+            finalizeInitialize(call, snapshot)
+            return
+        }
+
+        if (shouldRequestNotification(snapshot) && !state.requested.contains("notification")) {
             state.requested.add("notification")
             requestPermissionForAlias("notifications", call, "initializeNotificationPermissionCallback")
             return
         }
 
-        if (getPermissionState("location") != PermissionState.GRANTED && !state.requested.contains("location")) {
+        if (shouldRequestLocation(snapshot) && !state.requested.contains("location")) {
             state.requested.add("location")
             requestPermissionForAlias("location", call, "initializeLocationPermissionCallback")
             return
         }
 
-        if (getPermissionState("location") == PermissionState.GRANTED &&
-            shouldRequestBackground() &&
-            !state.requested.contains("background")
-        ) {
+        if (shouldRequestBackground(snapshot) && !state.requested.contains("background")) {
             state.requested.add("background")
             requestPermissionForAlias("backgroundLocation", call, "initializeBackgroundPermissionCallback")
             return
         }
 
-        finalizeInitialize(call)
+        finalizeInitialize(call, snapshot)
     }
 
-    private fun finalizeInitialize(call: PluginCall) {
+    private fun finalizeInitialize(call: PluginCall, snapshot: InitPermissionSnapshot = currentInitPermissionSnapshot()) {
         val state = initStates.remove(call.callbackId) ?: InitState()
-
-        val missing = mutableListOf<String>()
-        val granted = mutableListOf<String>()
-
-        if (isNotificationPermissionRelevant()) {
-            if (getPermissionState("notifications") == PermissionState.GRANTED) {
-                granted.add("notification")
-            } else {
-                missing.add("notification")
-            }
-        }
-
-        if (getPermissionState("location") == PermissionState.GRANTED) {
-            granted.add("location")
-            if (isBackgroundPermissionRelevant()) {
-                if (getPermissionState("backgroundLocation") == PermissionState.GRANTED) {
-                    granted.add("background")
-                } else {
-                    missing.add("background")
-                }
-            } else {
-                granted.add("background")
-            }
-        } else {
-            missing.add("location")
-            missing.add("background")
-        }
+        val missing = computeMissing(snapshot)
+        val granted = computeGranted(snapshot)
 
         val result = JSObject()
         result.put("ready", missing.isEmpty())
@@ -477,11 +463,67 @@ class GeofencePlugin : Plugin() {
 
     private fun isNotificationPermissionRelevant(): Boolean = android.os.Build.VERSION.SDK_INT >= 33
 
-    private fun shouldRequestBackground(): Boolean {
-        return isBackgroundPermissionRelevant() && getPermissionState("backgroundLocation") != PermissionState.GRANTED
+    private fun currentInitPermissionSnapshot(): InitPermissionSnapshot {
+        return InitPermissionSnapshot(
+            location = getPermissionState("location"),
+            backgroundLocation = getPermissionState("backgroundLocation"),
+            notifications = getPermissionState("notifications"),
+            backgroundRelevant = isBackgroundPermissionRelevant(),
+            notificationsRelevant = isNotificationPermissionRelevant(),
+        )
     }
 
-    private fun shouldRequestNotification(): Boolean {
-        return isNotificationPermissionRelevant() && getPermissionState("notifications") != PermissionState.GRANTED
+    private fun shouldRequestLocation(snapshot: InitPermissionSnapshot): Boolean {
+        return snapshot.location != PermissionState.GRANTED
+    }
+
+    private fun shouldRequestBackground(snapshot: InitPermissionSnapshot): Boolean {
+        return snapshot.location == PermissionState.GRANTED &&
+            snapshot.backgroundRelevant &&
+            snapshot.backgroundLocation != PermissionState.GRANTED
+    }
+
+    private fun shouldRequestNotification(snapshot: InitPermissionSnapshot): Boolean {
+        return snapshot.notificationsRelevant && snapshot.notifications != PermissionState.GRANTED
+    }
+
+    private fun computeMissing(snapshot: InitPermissionSnapshot): MutableList<String> {
+        val missing = mutableListOf<String>()
+
+        if (snapshot.notificationsRelevant && snapshot.notifications != PermissionState.GRANTED) {
+            missing.add("notification")
+        }
+
+        if (snapshot.location == PermissionState.GRANTED) {
+            if (snapshot.backgroundRelevant && snapshot.backgroundLocation != PermissionState.GRANTED) {
+                missing.add("background")
+            }
+        } else {
+            missing.add("location")
+            missing.add("background")
+        }
+
+        return missing
+    }
+
+    private fun computeGranted(snapshot: InitPermissionSnapshot): MutableList<String> {
+        val granted = mutableListOf<String>()
+
+        if (snapshot.notificationsRelevant) {
+            if (snapshot.notifications == PermissionState.GRANTED) {
+                granted.add("notification")
+            }
+        } else {
+            granted.add("notification")
+        }
+
+        if (snapshot.location == PermissionState.GRANTED) {
+            granted.add("location")
+            if (!snapshot.backgroundRelevant || snapshot.backgroundLocation == PermissionState.GRANTED) {
+                granted.add("background")
+            }
+        }
+
+        return granted
     }
 }

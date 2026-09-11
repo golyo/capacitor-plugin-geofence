@@ -42,6 +42,49 @@ final class GeofenceEngine: NSObject, CLLocationManagerDelegate, UNUserNotificat
         continueInitializeFlow()
     }
 
+    private func continueInitializeFlow() {
+        checkPermissionStatus { [weak self] status in
+            guard let self else { return }
+
+            // If all permissions granted, finalize immediately
+            let missing = self.computeMissing(status)
+            if missing.isEmpty {
+                self.finalizeInitialize(status)
+                return
+            }
+
+            // Request notification permission first
+            if self.shouldRequestNotification(status) {
+                self.markRequested("notification")
+                self.requestNotificationPermission { _ in
+                    self.continueInitializeFlow()
+                }
+                return
+            }
+
+            // Request location permission
+            if self.shouldRequestLocation(status) {
+                self.markRequested("location")
+                self.requestLocationPermission { _ in
+                    self.continueInitializeFlow()
+                }
+                return
+            }
+
+            // Request background location permission
+            if self.shouldRequestBackground(status) {
+                self.markRequested("background")
+                self.requestBackgroundLocationPermission { _ in
+                    self.continueInitializeFlow()
+                }
+                return
+            }
+
+            // All permissions handled
+            self.finalizeInitialize(status)
+        }
+    }
+
     func checkPermissionStatus(completion: @escaping (JSObject) -> Void) {
         notificationCenter.getNotificationSettings { settings in
             completion(self.buildPermissionStatusPayload(notificationSettings: settings))
@@ -555,49 +598,15 @@ final class GeofenceEngine: NSObject, CLLocationManagerDelegate, UNUserNotificat
         }
     }
 
-    private func buildPermissionStatusPayload(notificationSettings: UNNotificationSettings) -> JSObject {
-        return [
-            "location": locationPermissionStatusString(),
-            "backgroundLocation": backgroundPermissionStatusString(),
-            "notifications": notificationPermissionStatusString(notificationSettings),
-        ]
-    }
+     private func buildPermissionStatusPayload(notificationSettings: UNNotificationSettings) -> JSObject {
+         return [
+             "location": locationPermissionStatusString(),
+             "backgroundLocation": backgroundPermissionStatusString(),
+             "notifications": notificationPermissionStatusString(notificationSettings),
+         ]
+     }
 
-    private func continueInitializeFlow() {
-        checkPermissionStatus { status in
-            self.updateBackgroundLocationUpdatesFlag()
-            if self.shouldRequestNotification(status) {
-                self.markRequested("notification")
-                self.requestNotificationPermission { _ in
-                    self.continueInitializeFlow()
-                }
-                return
-            }
-
-            if self.shouldRequestLocation(status) {
-                self.markRequested("location")
-                self.locationManager.requestWhenInUseAuthorization()
-                return
-            }
-
-            if self.locationPermissionValue(status) != "granted" {
-                self.finalizeInitialize(status)
-                return
-            }
-
-            if self.shouldRequestBackground(status) {
-                self.markRequested("background")
-                self.locationManager.requestAlwaysAuthorization()
-                return
-            }
-
-            self.locationManager.startUpdatingLocation()
-            self.locationManager.startMonitoringSignificantLocationChanges()
-            self.finalizeInitialize(status)
-        }
-    }
-
-    private func finalizeInitialize(_ status: JSObject) {
+     private func finalizeInitialize(_ status: JSObject) {
         let missing = computeMissing(status)
         let granted = computeGranted(status)
         let result: JSObject = [
